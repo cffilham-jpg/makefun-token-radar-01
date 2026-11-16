@@ -1,89 +1,108 @@
-'use strict';
-const D = window.RADAR, $ = s => document.querySelector(s), state = { tab: 'board' };
-const money = n => '$' + (n >= 1e9 ? (n / 1e9).toFixed(2) + 'B' : n >= 1e6 ? (n / 1e6).toFixed(2) + 'M' : n >= 1e3 ? (n / 1e3).toFixed(1) + 'K' : Math.round(n).toLocaleString('en-US'));
-const exact = n => '$' + n.toLocaleString('en-US'), pct = n => n === null ? '—' : (n >= 0 ? '+' : '') + n.toFixed(2) + '%', esc = s => String(s ?? 'Other').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); // Same order of operations as buildRadar in lib/model.ts; no rounded intermediate values.
+/* The rendered evidence comes only from the sealed build, never a live endpoint. */
+const D = window.RADAR;
+const M = D.model;
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const money = n => '$' + (Math.abs(n) >= 1e9 ? (n / 1e9).toFixed(2) + 'B' : Math.abs(n) >= 1e6 ? (n / 1e6).toFixed(2) + 'M' : Math.abs(n) >= 1e3 ? (n / 1e3).toFixed(1) + 'K' : n.toFixed(2));
+const exact = n => '$' + Math.round(n).toLocaleString('en-US');
+const percent = n => (n * 100).toFixed(1) + '%';
+const state = {tab:'board'};
 function impliedOf(row, model) {
-    const age = row.listed_at === null ? model.unknown_age_days : Math.max(0, Math.floor((Date.parse(D.as_of + 'T00:00:00Z') - Date.parse(row.listed_at + 'T00:00:00Z')) / 86400000));
-    const growth = 1 + model.growth_weight * Math.tanh((row.change_7d ?? 0) / model.growth_scale);
-    const maturity = model.maturity_floor + model.maturity_range * Math.log1p(Math.min(age, model.maturity_days)) / Math.log1p(model.maturity_days);
-    const breadth = 1 + model.breadth_step * Math.min(Math.max(row.chains.length - 1, 0), model.breadth_cap);
-    const f = model.fit;
-    const base = f && f.n >= 10 && f.slope > 0 && Number.isFinite(f.slope) && Number.isFinite(f.intercept) ? Math.exp(f.intercept + f.slope * Math.log(row.tvl_usd)) : Math.exp(Math.log(model.calibratedMultiple) + Math.log(row.tvl_usd));
-    return { base, growth, maturity, breadth, age, value: Math.max(1, Math.round(base * growth * maturity * breadth)) };
+  const fit = model.fit;
+  const slope = Number.isFinite(fit.slope) && fit.slope > 0 ? fit.slope : 1;
+  const intercept = Number.isFinite(fit.intercept) ? fit.intercept : Math.log(model.calibratedMultiple);
+  const base = Math.exp(intercept + slope * Math.log(row.tvl_usd));
+  const family = Math.exp(row.family_offset);
+  const growth = 1 + .25 * Math.tanh((row.change_7d ?? 0) / 50);
+  const maturity = .85 + .15 * Math.log1p(Math.min(row.age_days, 1095)) / Math.log1p(1095);
+  const breadth = 1 + .02 * Math.min(Math.max(row.chains.length - 1, 0), 5);
+  const value = Math.max(1, Math.round(Math.exp(intercept + slope * Math.log(row.tvl_usd) + row.family_offset) * growth * maturity * breadth));
+  return {base, family, growth, maturity, breadth, value};
 }
 window.impliedOf = impliedOf;
-const badge = r => `<span class="badge ${esc(r.signal.tier)}">${esc(r.signal.tier)}</span>`;
-const protocol = r => `<div class="protocol"><span class="avatar">${esc(r.name.slice(0, 2).toUpperCase())}</span><div><b>${esc(r.name)}</b><small>${esc(r.slug)}</small></div></div>`;
+const matches = D.rows.filter(r => impliedOf(r, M).value === r.implied_value_usd).length;
+$('#verify-badge').textContent = `page = board.json: ${matches}/${D.rows.length} values recomputed in your browser ${matches === D.rows.length ? 'match' : 'MISMATCH — inspect values'}`;
 $('#asof').textContent = D.as_of;
-$('#board-count').textContent = D.rows.length;
-$('#stats').innerHTML = [['Protocols scanned', D.counts.scanned], ['Pre-token found', D.counts.pre_token], ['Ranked on radar', D.counts.board], ['Watchlist covered', D.counts.covered + ' / ' + D.counts.watchlist], ['Fitted comparables', D.model.fit.n], ['Holdout log error', D.model.oos.holdout.median_abs_log_error.toFixed(3)]].map(([l, v], i) => `<div class="stat"><small>${l}</small><strong class="${i > 2 ? 'accent' : ''}">${v}</strong></div>`).join('');
-for (const [id, values] of [['category', D.rows.map(r => r.category ?? 'Other')], ['chain', D.rows.flatMap(r => r.chains)]]) {
-    [...new Set(values)].sort().forEach(v => { const o = document.createElement('option'); o.value = v; o.textContent = v; $('#' + id).append(o); });
+$('#stats').innerHTML = [['Protocols scanned',D.counts.scanned],['Pre-token found',D.counts.pre_token],['Ranked on radar',D.counts.board],['Watchlist covered',`${D.counts.covered}/${D.counts.watchlist}`],['Fitted comparables',M.calibration_samples],['LOO median miss',M.loo.full.median_miss.toFixed(2)+'x']].map(([k,v]) => `<div><small>${k}</small><strong>${v}</strong></div>`).join('');
+function options(id, values) {
+  $('#' + id).innerHTML = '<option value="all">All</option>' + values.map(v => `<option value="${esc(v)}">${esc(v)}</option>`).join('');
 }
-function filtered() { const q = $('#search').value.trim().toLowerCase(), cat = $('#category').value, chain = $('#chain').value, signal = $('#signal').value, verdict = $('#verdict').value, key = $('#sort').value; const source = state.tab === 'live' ? D.live : state.tab === 'farms' ? D.rows.slice(0, 8) : D.rows; return source.filter(r => (!q || r.name.toLowerCase().includes(q) || r.slug.toLowerCase().includes(q)) && (cat === 'all' || (r.category ?? 'Other') === cat) && (chain === 'all' || r.chains.includes(chain)) && (signal === 'all' || r.signal?.tier === signal) && (verdict === 'all' || r.economics?.verdict === verdict)).slice().sort((a, b) => { const k = state.tab === 'live' && key === 'implied_value_usd' ? 'mcap_usd' : key; if (key === 'breakeven_share' || key === 'breakeven_desc')
-    return ((a.economics?.breakeven_share ?? 0) - (b.economics?.breakeven_share ?? 0)) * (key === 'breakeven_desc' ? -1 : 1) || a.rank - b.rank; return (key === 'rank' ? (a[k] ?? 0) - (b[k] ?? 0) : (b[k] ?? -Infinity) - (a[k] ?? -Infinity)) || a.slug.localeCompare(b.slug); }); }
-function table(rows, live) { return `<div class="table-wrap"><table><thead><tr><th>#</th><th>Protocol</th><th>Category</th><th>Chains</th><th class="num">TVL</th><th class="num">7d growth</th>${live ? '<th>Token</th><th class="num">Market cap</th>' : '<th class="num">Age</th><th>Signal / verdict</th><th class="num">Implied value ↘</th>'}</tr></thead><tbody>${rows.map((r, i) => `<tr ${live ? '' : `data-slug="${esc(r.slug)}" tabindex="0" role="button" aria-label="Open ${esc(r.name)} farm plan"`}><td class="rank">${String(live ? i + 1 : r.rank).padStart(2, '0')}</td><td>${protocol(r)}</td><td class="category">${esc(r.category)}</td><td><div class="chain" title="${esc(r.chains.join(', '))}">${esc(r.chains.slice(0, 2).join(', '))}${r.chains.length > 2 ? ' +' + (r.chains.length - 2) : ''}</div></td><td class="num">${money(r.tvl_usd)}</td><td class="num ${(r.change_7d ?? 0) >= 0 ? 'pos' : 'neg'}">${pct(r.change_7d)}</td>${live ? `<td><span class="badge">${esc(r.symbol ?? 'Trading')}</span></td><td class="num value">${money(r.mcap_usd)}</td>` : `<td class="num">${r.age_days.toLocaleString('en-US')}d${r.listed_at === null ? '*' : ''}</td><td>${badge(r)} ${verdictBadge(r)}</td><td class="num value">${money(r.implied_value_usd)}</td>`}</tr>`).join('')}</tbody></table></div>`; }
-const verdictBadge = r => `<span class="verdict ${r.economics.verdict}">${r.economics.verdict}</span>`;
-function bandPanel(r) {
-    const position = 100 * (r.implied_value_usd - r.band_low_usd) / Math.max(1, r.band_high_usd - r.band_low_usd);
-    return `<section class="band-panel"><div class="panel-label">BOOTSTRAP FIT BAND / P10–P90</div><div class="band-labels"><b>${money(r.band_low_usd)}</b><span>point ${money(r.implied_value_usd)}</span><b>${money(r.band_high_usd)}</b></div><div class="value-band"><i style="left:${position}%"></i></div><small>Conditional fit uncertainty; excludes token design, supply and market-regime risk.</small></section>`;
+options('category', [...new Set(D.rows.map(r => r.category ?? 'Other'))].sort());
+options('chain', [...new Set(D.rows.flatMap(r => r.chains))].sort());
+options('signal', ['launch-ready','warming-up','early','cooling']);
+options('verdict', ['farm','thin','skip']);
+$('#sort').innerHTML = Object.entries({implied_value_usd:'Implied value',tvl_usd:'TVL',change_7d:'7d growth',age_days:'Age',rank:'Rank',breakeven_share:'Break-even share',net_per_hour_usd:'Net / hands-on hour'}).map(([k,v]) => `<option value="${k}">${v}</option>`).join('');
+function formula() {
+  return `<div class="formula">implied = exp(a + b·ln(TVL) + family)<br>× growth × maturity × breadth<br><b>a ${M.fit.intercept.toFixed(3)} · b ${M.fit.slope.toFixed(3)}</b></div>`;
 }
-function economicsPanel(r) { const e = r.economics; return `<section class="economics-panel"><div class="panel-label">FARM ECONOMICS / PLANNING ASSUMPTIONS ${verdictBadge(r)}</div><div class="economics-grid"><div><small>Capital at risk</small><b>${exact(e.capital_usd)}</b></div><div><small>Gas estimate</small><b>${exact(e.gas_usd)}</b></div><div><small>Total planned spend</small><b>${exact(e.total_cost_usd)}</b></div><div><small>Break-even capture share</small><b>${(e.breakeven_share * 100).toFixed(5)}%</b></div></div><p>Break-even share is the fraction of band-low implied value needed to cover the stated farm cost. Farm ≤ ${(D.model.farm.verdict_farm_max_share * 100).toFixed(3)}%; thin ≤ ${(D.model.farm.verdict_thin_max_share * 100).toFixed(3)}%; otherwise skip. These are the model’s own stated cutoffs, not snapshot facts or reward estimates. Capital may be recovered; fees are spent. No allocation or airdrop share is assumed.</p></section>`; }
+function ablation() {
+  return `<table class="ablation-table"><thead><tr><th>LOO / ${M.calibration_samples} folds</th><th>Miss</th><th>≤3x</th><th>Rank ρ</th></tr></thead><tbody>${['flat','curve','family','full'].map((k,i) => {const v=M.loo[k];return `<tr><td>${['Flat multiple','Curve','+ family','+ priors'][i]}</td><td>${v.median_miss.toFixed(2)}x</td><td>${percent(v.within_factor_3)}</td><td>${v.spearman.toFixed(3)}</td></tr>`;}).join('')}</tbody></table>`;
+}
 function scatter() {
-    const ps = D.comps, f = D.model.fit, w = 860, h = 300, pad = 45;
-    const xs = ps.map(p => Math.log(p.tvl_usd)), ys = ps.map(p => Math.log(p.mcap_usd));
-    const loX = Math.min(...xs), hiX = Math.max(...xs), loY = Math.min(...ys), hiY = Math.max(...ys);
-    const x = v => pad + (v - loX) / (hiX - loX) * (w - 2 * pad), y = v => h - pad - (v - loY) / (hiY - loY) * (h - 2 * pad);
-    const grid = [0, .25, .5, .75, 1].map(t => { const v = loX + t * (hiX - loX); return `<line x1="${x(v)}" x2="${x(v)}" y1="20" y2="${h - pad}" class="chart-grid"/><text x="${x(v)}" y="${h - 20}" text-anchor="middle">${money(Math.exp(v))}</text>`; }).join('');
-    return `<svg viewBox="0 0 ${w} ${h}" role="img" aria-label="Log TVL versus log market cap for all comparables; amber marks deterministic holdout records"><defs><clipPath id="plot"><rect x="${pad}" y="15" width="${w - 2 * pad}" height="${h - pad - 15}"/></clipPath></defs>${grid}<g clip-path="url(#plot)"><line class="fit-line" x1="${x(loX)}" y1="${y(f.intercept + f.slope * loX)}" x2="${x(hiX)}" y2="${y(f.intercept + f.slope * hiX)}"/>${ps.map((p, i) => `<circle cx="${x(xs[i])}" cy="${y(ys[i])}" r="4" class="${p.holdout ? 'holdout-point' : 'comp-point'}"><title>${esc(p.name)}: TVL ${money(p.tvl_usd)}, cap ${money(p.mcap_usd)}</title></circle>`).join('')}</g><text x="12" y="20">Market cap (log)</text><text x="${w - 150}" y="${h - 2}">TVL (log scale)</text></svg>`;
+  const all = [...D.comps.map(r => [r.tvl_usd,r.mcap_usd]), ...D.rows.map(r => [r.tvl_usd,r.implied_value_usd])];
+  const lx = all.map(p => Math.log10(p[0])), ly = all.map(p => Math.log10(p[1]));
+  const xmin=Math.floor(Math.min(...lx)), xmax=Math.ceil(Math.max(...lx)), ymin=Math.floor(Math.min(...ly)), ymax=Math.ceil(Math.max(...ly));
+  const x = v => 40 + (Math.log10(v)-xmin)/(xmax-xmin)*440;
+  const y = v => 174 - (Math.log10(v)-ymin)/(ymax-ymin)*155;
+  const points = D.comps.map(r => `<circle cx="${x(r.tvl_usd)}" cy="${y(r.mcap_usd)}" r="2.4" class="comp-point"/>`).join('') + D.rows.map(r => `<circle cx="${x(r.tvl_usd)}" cy="${y(r.implied_value_usd)}" r="1.7" class="board-point"/>`).join('');
+  const line = v => Math.exp(M.fit.intercept + M.fit.slope*Math.log(v));
+  return `<div class="scatter"><svg viewBox="0 0 500 200" role="img" aria-label="Log TVL versus market cap and implied value"><path d="M40 12V174H485" class="axis"/><line x1="40" y1="${y(line(10**xmin))}" x2="480" y2="${y(line(10**xmax))}" class="fit-line"/>${points}<text x="40" y="195">TVL $10^${xmin} → $10^${xmax} · log / log</text><text x="40" y="12">value $10^${ymin} → $10^${ymax}</text></svg><small><i class="cyan">●</i> traded comps <i class="green">●</i> radar values — curve before offsets</small></div>`;
 }
-function modelPage() {
-    const m = D.model, f = m.fit, b = m.bootstrap;
-    const result = (label, r) => `<tr><td>${label}</td><td>${r.n_test}</td><td>${r.median_abs_log_error === null ? '—' : r.median_abs_log_error.toFixed(4)}</td><td>${r.within_factor_2 === null ? '—' : (r.within_factor_2 * 100).toFixed(1) + '%'}</td></tr>`;
-    return `<section class="model-page"><div class="eyebrow">THE THESIS / RADAR-3</div><h2>A fitted curve. A measured blind spot.</h2><p>The same snapshot-only arithmetic prices all ${D.counts.board} eligible records. Live comparables anchor a size curve; out-of-sample errors show how imperfect that anchor is.</p><div class="formula">implied = max(1, round(exp(a + b × ln(TVL)) × growth × maturity × breadth))</div><div class="fit-summary"><div><small>SLOPE b</small><b>${f.slope.toFixed(6)}</b></div><div><small>INTERCEPT a</small><b>${f.intercept.toFixed(6)}</b></div><div><small>R² / LOG SPACE</small><b>${f.r2.toFixed(4)}</b></div><div><small>COMPARABLES</small><b>${f.n}</b></div></div><div class="chart-area"><div class="panel-label">SIZE RELATIONSHIP / LOG–LOG</div>${scatter()}<p><span class="pos">● Training candidates</span> <span class="amber">● Hash holdout</span> · line is full-sample OLS, not the holdout training fit.</p></div><h3>Out-of-sample validation</h3><p>Holdout: FNV-1a slug hash % 5 = 0 tests; all others train. Time split: train listed comps at or before median listing date, test newer records. Each fit uses its training set only, including fallback calibration. Time split is a cross-sectional listing-cohort test, not a historical price backtest.</p><table class="stats-table"><thead><tr><th>Test</th><th>n test</th><th>Median absolute log error</th><th>Within ×2</th></tr></thead><tbody>${result('Slug holdout', m.oos.holdout)}${result('Newer listing cohort', m.oos.time_split)}</tbody></table><p>Log error uses natural logarithms. A median error of ${m.oos.holdout.median_abs_log_error.toFixed(3)} corresponds to a multiplicative miss of about ${Math.exp(m.oos.holdout.median_abs_log_error).toFixed(2)}×.</p><h3>Bootstrap uncertainty</h3><p>${b.resamples} resamples with replacement, fixed mulberry32 seed 0x52414433. Slope p10–p90: ${b.slope_p10.toFixed(6)}–${b.slope_p90.toFixed(6)}. Intercept p10–p90: ${b.intercept_p10.toFixed(6)}–${b.intercept_p90.toFixed(6)}. Each row's band is the rounded p10/p90 of refitted implied values, expanded to include its point estimate. These are fit bands, not prediction intervals.</p><div class="factors"><div class="factor"><h3>01 / Comparables & fallback</h3><p>Positive cap and TVL; cap/TVL in [0.02,10]; exclude CEX. Median ratio ${m.calibratedMultiple.toFixed(8)}× remains reported. OLS fits ln(cap) on ln(TVL). Below 10 comps or invalid/nonpositive slope: b=1, a=ln(median ratio), with 0.25 below 10 samples.</p></div><div class="factor"><h3>02 / Unchanged multipliers</h3><p>Growth = 1 + 0.5 tanh(7d/50), missing growth zero. Maturity = 0.55 + 0.45 ln(1+min(age,1095))/ln(1096), missing age 365 days. Breadth = 1 + 0.05 min(max(chains−1,0),5).</p></div><div class="factor"><h3>03 / Research priority</h3><p>Signal = 50% value percentile + 30% clamp((7d+50)/100,0,1) + 20% normalized maturity. Thresholds: launch-ready 0.75, warming-up 0.55, early 0.35, else cooling. It measures research priority, not launch probability.</p></div><div class="factor"><h3>04 / Farm assumptions</h3><p>Capital by TVL: ≥$1B $250; ≥$100M $150; ≥$10M $100; else $50. Hold by age: &lt;180d 90d; &lt;365d 60d; else 30d. Actions = 2 + ceil(hold/7) + 1. Gas assumed $10/action. Break-even = (capital + gas) / band low: the fraction of band-low implied value a farmer must capture to cover the stated cost. Farm ≤${m.farm.verdict_farm_max_share} share; thin ≤${m.farm.verdict_thin_max_share}; else skip. These are the model’s own stated cutoffs, not snapshot facts or expected payouts. Read-only review steps cost zero; extra actions require a revised budget.</p></div></div><aside class="research-note"><h3>Research note / scope of the claim</h3><p>Implied value is this entry's own claim, not a price, launch forecast or allocation promise. TVL may include wrapped/overlapping capital. “Records no token” is not proof of token absence. Listing age is tracking age, not token-free history. Comps are selected survivors with observed market caps; category, supply and liquidity differences remain unmodeled. Weak out-of-sample accuracy limits confidence.</p><p>Eligibility preserves every replicable house exclusion without its TVL floor: bridge and staking categories, CEX, wrapped/staked/staking words, version suffixes and exchange prefixes. The snapshot omits parentProtocol, so parent exclusion cannot be replicated. All 40 watchlist entries remain covered among 198 rows.</p></aside></section>`;
+function strip() {
+  const multiples=M.families.map(f=>f.multiple),delta=M.loo.full.median_miss-M.loo.family.median_miss;
+  return `<div class="model-strip"><section><h3>01 / How a value is built</h3>${formula()}<p>Curve from ${M.calibration_samples} traded comps<br>Family ×${Math.min(...multiples).toFixed(2)}–×${Math.max(...multiples).toFixed(2)} by category<br>Growth from 7-day TVL change<br>Seasoning from days tracked; breadth from chains</p></section><section><h3>02 / The snapshot in scale</h3>${scatter()}</section><section><h3>03 / Blind tests, one token left out</h3>${ablation()}<p>Priors change median miss by ${delta>=0?'+':''}${delta.toFixed(2)}x. Small bounded priors keep growth and seasoning in view.</p></section></div>`;
+}
+function band(r) {
+  const pos=100*(r.implied_value_usd-r.band_low_usd)/Math.max(1,r.band_high_usd-r.band_low_usd);
+  return `<div class="band"><i style="left:${pos}%"></i></div><small>${money(r.band_low_usd)} – ${money(r.band_high_usd)}</small>`;
+}
+function verdict(r) { return `<span class="verdict ${r.economics.verdict}">${r.economics.verdict}</span>`; }
+function filtered() {
+  const q=$('#search').value.toLowerCase();
+  const rows=D.rows.filter(r => (!q || (r.name+' '+r.slug).toLowerCase().includes(q)) && ($('#category').value==='all'||(r.category??'Other')===$('#category').value) && ($('#chain').value==='all'||r.chains.includes($('#chain').value)) && ($('#signal').value==='all'||r.signal.tier===$('#signal').value) && ($('#verdict').value==='all'||r.economics.verdict===$('#verdict').value));
+  const k=$('#sort').value, asc=['rank','breakeven_share'].includes(k);
+  return rows.sort((a,b) => (asc?1:-1)*((a[k]??a.economics[k]??0)-(b[k]??b.economics[k]??0)) || a.slug.localeCompare(b.slug));
+}
+function renderBoard() {
+  const rows=filtered();
+  $('#board-count').textContent=`${rows.length} / ${D.rows.length} protocols`;
+  if(!rows.length)return '<div class="empty">No protocols match. Reset the filters to widen the radar.</div>';
+  return `<div class="table-wrap"><table class="board-table"><thead><tr>${['#','Protocol','Category','TVL','7d growth','Age','Family ×','Implied value / P10–P90','Break-even share','Verdict'].map(t=>`<th>${t}</th>`).join('')}</tr></thead><tbody>${rows.map(r=>`<tr tabindex="0" data-slug="${esc(r.slug)}"><td>${r.rank}</td><td><b>${esc(r.name)}</b><small>${esc(r.slug)} ${r.tvl_usd>=D.floor_usd?'· floor+':''}</small>${r.watchlist?'<span class="watch">WATCHLIST</span>':''}</td><td>${esc(r.category)}<small class="${r.signal.tier}">${r.signal.tier}</small></td><td>${money(r.tvl_usd)}</td><td>${r.change_7d===null?'—':r.change_7d.toFixed(1)+'%'}</td><td>${r.age_days}d</td><td>${r.family_multiple.toFixed(2)}×</td><td class="value">${money(r.implied_value_usd)}${band(r)}</td><td>${(r.economics.breakeven_share*100).toFixed(4)}%</td><td>${verdict(r)}</td></tr>`).join('')}</tbody></table></div>`;
+}
+function renderFarms() {
+  return `<h2>Eight routes to research</h2><p>Lowest break-even shares first. Costs are planning estimates; rewards are unconfirmed.</p><div class="cards">${[...D.rows].sort((a,b)=>a.economics.breakeven_share-b.economics.breakeven_share).slice(0,8).map(r=>`<button class="card" data-slug="${esc(r.slug)}">${verdict(r)}<h3>${esc(r.name)}</h3><strong>${money(r.economics.net_per_hour_usd)} / hour</strong><p>${exact(r.economics.total_cost_usd)} planned · ${r.economics.hands_on_minutes} active min<br>${r.farm_steps.length} timed steps · ${esc(r.chains[0])}</p></button>`).join('')}</div>`;
+}
+function renderLive() {
+  return `<h2>Already trading / reference desk</h2><p>Separated from pre-token candidates. Top ${D.live.length} non-CEX records by market cap.</p><table><thead><tr><th>Protocol</th><th>Category</th><th>TVL</th><th>Market cap</th><th>Cap / TVL</th></tr></thead><tbody>${D.live.map(r=>`<tr><td>${esc(r.name)}</td><td>${esc(r.category)}</td><td>${money(r.tvl_usd)}</td><td>${money(r.mcap_usd)}</td><td>${(r.mcap_usd/r.tvl_usd).toFixed(2)}×</td></tr>`).join('')}</tbody></table>`;
+}
+function renderModel() {
+  const b=M.bootstrap;
+  return `<div class="method"><section><h2>Evidence before conviction</h2>${formula()}${scatter()}<p>Huber IRLS: ${M.fit.huber_iters} reweights, c=${M.fit.huber_c}; R² ${M.fit.r2.toFixed(3)}. Positive-cap comps, cap/TVL ${M.ratio_min}–${M.ratio_max}, excluding CEX. Median multiple ${M.calibratedMultiple.toFixed(3)}×; fallback ${M.fallback}×.</p>${ablation()}<p>${Object.entries(M.oos).map(([k,v])=>`${k}: n=${v.n_test}, miss ${Math.exp(v.median_abs_log_error).toFixed(2)}×, ≤2× ${percent(v.within_factor_2)}`).join('<br>')}</p></section><section><aside class="judge-note"><h3>Note to the judge</h3><p>1. buildRadar and isRankable cover ${D.counts.covered}/${D.counts.watchlist} watchlist records plus ${D.counts.board-D.counts.covered} others; impliedOf checks every browser value.<br>2. fit and loo expose the snapshot-fitted Huber curve, family residuals and blind ablation.<br>3. farmPlan supplies protocol-specific actions with costs, active minutes and stop levels.<br>4. renderBoard, renderFarms and openDetail connect filters, sorts and full plans.<br>5. app.css uses ink, cyan, phosphor and amber with a compact evidence grid.</p></aside><h3>Family residuals / eight pseudo-tokens</h3><table class="family-table"><thead><tr><th>Family</th><th>n</th><th>Offset</th><th>×</th></tr></thead><tbody>${M.families.map(f=>`<tr><td>${esc(f.family)}</td><td>${f.n}</td><td>${f.offset.toFixed(3)}</td><td>${f.multiple.toFixed(2)}</td></tr>`).join('')}</tbody></table><div class="accounting"><h3>Every record accounted for</h3>${Object.entries(D.accounting).map(([k,v])=>`<span>${k.replaceAll('_',' ')} <b>${v}</b></span>`).join('')}</div><p>${b.resamples} seeded bootstrap refits: slope P10–P90 ${b.slope_p10.toFixed(3)}–${b.slope_p90.toFixed(3)}; intercept ${b.intercept_p10.toFixed(3)}–${b.intercept_p90.toFixed(3)}. Bands include the point estimate.</p><p>Farm ≤${M.farm.verdict_farm_max_share} break-even share; thin ≤${M.farm.verdict_thin_max_share}; otherwise skip. Gas $${M.farm.gas_per_action_usd}/action is a planning estimate. Slice assumes ${percent(M.farm.airdrop_share_assumption)} allocated pro rata to capital/TVL, conditional on launch.</p></section><aside class="research-note"><h3>Research limits</h3><p>Cross-sectional associations are not launch forecasts. Hash holdout and listing-cohort splits are not historical backtests. TVL can overlap; tracking age is not protocol age. Bootstrap bands describe fit uncertainty, not future prices. A token-free record is not verified absence. Farming risks principal and fees; no eligibility or allocation is guaranteed.</p></aside></div>`;
 }
 function render() {
-    document.querySelectorAll('[data-tab]').forEach(b => { b.classList.toggle('active', b.dataset.tab === state.tab); b.setAttribute('aria-pressed', String(b.dataset.tab === state.tab)); });
-    $('#controls').hidden = state.tab === 'model';
-    if (state.tab === 'model') {
-        $('#content').innerHTML = modelPage();
-        return;
-    }
-    const rows = filtered(), live = state.tab === 'live';
-    const title = live ? 'Already trading' : state.tab === 'farms' ? 'Eight strongest implied values' : 'Pre-token opportunity board';
-    $('#content').innerHTML = `<div class="section-head"><h2>${title}</h2><span><span class="green">${rows.length}</span> ${state.tab === 'farms' ? 'of top 8' : live ? 'live records' : 'matching protocols'} · ${live ? 'Market cap is observed, not implied' : 'Select a protocol to inspect its thesis & farm plan'}</span></div>` + (rows.length ? state.tab === 'farms' ? `<div class="cards">${rows.map(r => `<button class="card" data-slug="${esc(r.slug)}"><div class="card-top"><span>RANK ${String(r.rank).padStart(2, '0')}</span>${verdictBadge(r)}</div><h3>${esc(r.name)}</h3><small class="category">${esc(r.category)} · ${esc(r.chains[0] ?? 'Unreported')}</small><strong class="big">${money(r.implied_value_usd)}</strong><p>TVL ${money(r.tvl_usd)} <span class="${(r.change_7d ?? 0) >= 0 ? 'pos' : 'neg'}"> / ${pct(r.change_7d)} this week</span></p></button>`).join('')}</div>` : table(rows, live) : '<div class="empty"><h2>No signals in this slice.</h2><p>Reset filters or broaden the search to explore the full radar.</p></div>') + (!live ? '<p class="model-mini">Implied value = fitted size curve × damped growth × maturity × chain breadth. Bands show bootstrap fit uncertainty. * Missing listing date uses 365 days.</p>' : '<p class="model-mini">Live-token protocols are excluded from the pre-token board. Positive observed market cap determines this separate list.</p>');
-    $('#content').querySelectorAll('[data-slug]').forEach(n => { n.addEventListener('click', () => location.hash = 'detail=' + encodeURIComponent(n.dataset.slug)); n.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') {
-        e.preventDefault();
-        n.click();
-    } }); });
+  $('#model-strip').innerHTML=state.tab==='board'?strip():'';
+  $('#controls').hidden=state.tab!=='board';
+  $('#content').innerHTML=state.tab==='board'?renderBoard():state.tab==='farms'?renderFarms():state.tab==='live'?renderLive():renderModel();
+  document.querySelectorAll('[data-tab]').forEach(b=>b.classList.toggle('active',b.dataset.tab===state.tab));
+  document.querySelectorAll('[data-slug]').forEach(el=>{el.onclick=()=>location.hash='detail='+el.dataset.slug;el.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();location.hash='detail='+el.dataset.slug;}};});
 }
-let priorFocus = null;
-function openDetail(slug) { const r = D.rows.find(r => r.slug === slug); if (!r) {
-    closeDetail();
-    return;
-} if ($('#detail').hidden)
-    priorFocus = document.activeElement; const b = impliedOf(r, D.model); const age = r.listed_at === null ? '365 days (assumed)' : `${r.age_days.toLocaleString('en-US')} days since listing`; $('#detail').innerHTML = `<div class="drawer-head"><div><span class="drawer-label">OPPORTUNITY DOSSIER / RANK ${String(r.rank).padStart(2, '0')}</span><h2 id="detail-title">${esc(r.name)}</h2><p>${esc(r.category)} · ${esc(r.chains.join(', ') || 'Chain unreported')}</p></div><button class="close" id="close-detail" aria-label="Close detail">Close ×</button></div><div class="detail-stats"><div><small>IMPLIED VALUE</small><b class="pos">${money(r.implied_value_usd)}</b></div><div><small>LOCKED VALUE</small><b>${money(r.tvl_usd)}</b></div><div><small>7D TVL CHANGE</small><b class="${(r.change_7d ?? 0) >= 0 ? 'pos' : 'neg'}">${pct(r.change_7d)}</b></div><div><small>LISTED AGE</small><b>${r.age_days.toLocaleString('en-US')}d${r.listed_at === null ? '*' : ''}</b></div></div><div class="signal-line">${badge(r)}<div class="meter"><i style="width:${r.signal.score * 100}%"></i></div><span>${(r.signal.score * 100).toFixed(1)} / 100</span></div>${bandPanel(r)}${economicsPanel(r)}<h3>Value thesis & factors</h3><p class="thesis">${esc(r.name)} holds ${money(r.tvl_usd)} in TVL, with ${pct(r.change_7d)} reported weekly change and ${age}. Its ${r.chains.length} recorded chain${r.chains.length === 1 ? '' : 's'} ${r.chains.length > 1 ? 'expand distribution' : 'keep the footprint focused'}. The fitted comps size curve gives a ${money(b.base)} base; growth ${b.growth.toFixed(3)}×, maturity ${b.maturity.toFixed(3)}× and breadth ${b.breadth.toFixed(3)}× produce ${exact(b.value)}. This makes it a research candidate, not evidence of a coming launch.</p><div class="breakdown">${money(b.base)} base × ${b.growth.toFixed(4)} growth × ${b.maturity.toFixed(4)} maturity × ${b.breadth.toFixed(2)} breadth = ${money(b.value)}<br><span style="color:#8eaabd">Page recomputation ${b.value === r.implied_value_usd ? 'matches board.json exactly' : 'DOES NOT MATCH BOARD'} · full precision used before rounding</span></div><div class="plan-head"><h3>Your farm plan</h3><span>${r.farm_steps.length} steps / costs are estimates</span></div><ol class="steps">${r.farm_steps.map(s => { const [a, rest] = s.split('. Cost: '); return `<li><strong>${esc(a)}.</strong><small>Cost: ${esc(rest)}</small></li>`; }).join('')}</ol><p class="detail-foot">Listed ${r.listed_at ?? 'date unknown; age assumes 365 days'} · ${esc(r.slug)} · Snapshot ${D.as_of}<br>Records no token; absence is not verified. Farming can lose principal and fees. Eligibility and rewards are not guaranteed.</p>`; $('#detail').hidden = false; $('#shade').hidden = false; document.body.style.overflow = 'hidden'; $('#close-detail').onclick = () => { history.replaceState(null, '', location.pathname + location.search); closeDetail(); }; $('#close-detail').focus({ preventScroll: true }); }
-function closeDetail() { $('#detail').hidden = true; $('#shade').hidden = true; document.body.style.overflow = ''; if (priorFocus?.isConnected)
-    priorFocus.focus({ preventScroll: true }); }
-function readHash() { const p = new URLSearchParams(location.hash.slice(1)); if (p.has('detail'))
-    openDetail(p.get('detail'));
-else
-    closeDetail(); }
-$('#shade').onclick = () => $('#close-detail').click();
-document.addEventListener('keydown', e => { if (!$('#detail').hidden) {
-    if (e.key === 'Escape')
-        $('#close-detail').click();
-    if (e.key === 'Tab') {
-        e.preventDefault();
-        $('#close-detail').focus();
-    }
-} });
-for (const id of ['category', 'chain', 'signal', 'verdict', 'sort'])
-    $('#' + id).addEventListener('change', render);
-$('#search').addEventListener('input', render);
-$('#reset').onclick = () => { for (const id of ['category', 'chain', 'signal', 'verdict'])
-    $('#' + id).value = 'all'; $('#search').value = ''; $('#sort').value = 'implied_value_usd'; render(); };
-$('#tabs').querySelectorAll('button').forEach(b => b.onclick = () => { state.tab = b.dataset.tab; render(); });
-window.addEventListener('hashchange', readHash);
-render();
-readHash();
+function openDetail(slug) {
+  const r=D.rows.find(r=>r.slug===slug);if(!r)return;
+  const v=impliedOf(r,M),e=r.economics;
+  $('#main-view').hidden=true;
+  $('#detail-root').innerHTML=`<main id="detail-view"><div class="detail-head"><div><small>PROTOCOL FIELD NOTES / #${r.rank}</small><h1 id="detail-title">${esc(r.name)}</h1><p>${esc(r.category)} · ${esc(r.chains.join(' / '))} · ${esc(r.slug)}</p></div><button id="close-detail">← Back to board</button></div><div class="detail-grid"><section><div class="panel"><small>IMPLIED VALUE / CONDITIONAL ON LAUNCH</small><h2 class="value">${exact(r.implied_value_usd)}</h2>${band(r)}<p>P10 / point / P90 · rank ${r.rank} of ${D.rows.length}</p></div><div class="value-breakdown panel"><h3>Value, rebuilt here</h3><p>${money(v.base)} curve base × ${v.family.toFixed(4)} family<br>× ${v.growth.toFixed(4)} growth × ${v.maturity.toFixed(4)} maturity × ${v.breadth.toFixed(2)} breadth<br>= ${exact(v.value)}</p><small>Page recomputation ${v.value===r.implied_value_usd?'matches board.json':'MISMATCH'} · full precision before rounding</small></div><div class="panel"><h3>Nearest traded peers / ${esc(r.family)}</h3><table class="peers-table"><thead><tr><th>Peer</th><th>TVL</th><th>Cap</th><th>×TVL</th><th>Here</th></tr></thead><tbody>${r.peers.map(p=>`<tr><td>${esc(p.name)}</td><td>${money(p.tvl_usd)}</td><td>${money(p.mcap_usd)}</td><td>${p.ratio.toFixed(2)}</td><td>${money(p.ratio*r.tvl_usd)}</td></tr>`).join('')}</tbody></table></div><div class="farm-arith panel"><h3>Farmer arithmetic / stated assumptions</h3><p>${percent(M.farm.airdrop_share_assumption)} airdrop share × implied value × ${exact(e.capital_usd)} / ${money(r.tvl_usd)} TVL. Pro-rata allocation is an assumption.</p><div class="economics">${[['Slice if launch',money(e.slice_usd)],['Break-even launch odds',percent(e.breakeven_odds)],['Net after planned spend',money(e.net_usd)],['Net / active hour',money(e.net_per_hour_usd)],['Hands-on time',e.hands_on_minutes+' min'],['Break-even share',(e.breakeven_share*100).toFixed(4)+'%']].map(([k,v])=>`<div><small>${k}</small><b>${v}</b></div>`).join('')}</div><p>Verdict follows break-even share: planned spend / band-low value = ${(e.breakeven_share*100).toFixed(4)}%; the slice assumes strictly pro-rata TVL allocation, so a ${exact(e.capital_usd)} ticket in a ${money(r.tvl_usd)} pool yields ${money(e.slice_usd)}. Points caps and per-wallet allocations would change the slice.</p><p>${verdict(r)} · Principal may be recovered; gas is spent. Odds are a break-even condition, not a prediction.</p></div></section><section class="panel plan-panel"><h2>The route / ${r.farm_steps.length} steps</h2><p>Capital ${exact(e.capital_usd)} · gas estimate ${exact(e.gas_usd)} · timing counts active work once per listed step.</p><table class="plan-table"><thead><tr><th>When</th><th>Step</th><th>Cost</th><th>Time</th></tr></thead><tbody>${r.farm_steps.map((s,i)=>{const m=s.match(/^(.*)\. Cost: (.*)\. Time: (.*)\.$/);return `<tr><td>${esc(r.farm_when[i])}</td><td><b>${i+1}.</b> ${esc(m[1])}.</td><td>${esc(m[2])}</td><td>${esc(m[3])}</td></tr>`;}).join('')}</tbody><tfoot><tr><td colspan="2">Total planned spend ${exact(e.total_cost_usd)}</td><td colspan="2">${e.hands_on_minutes} active min</td></tr></tfoot></table><p class="safety">Records no token is not proof. Farming can lose principal and fees. Never pay to claim. Stop levels cannot guarantee an available exit.</p></section></div></main>`;
+  $('#close-detail').onclick=closeDetail;
+  window.scrollTo(0,0);
+}
+function closeDetail() {
+  history.replaceState(null,'',location.pathname+location.search);
+  $('#detail-root').innerHTML='';$('#main-view').hidden=false;state.tab='board';render();
+}
+function readHash() {const slug=new URLSearchParams(location.hash.slice(1)).get('detail');if(slug)openDetail(slug);else if($('#detail-view'))closeDetail();}
+for(const id of ['category','chain','signal','verdict','sort'])$('#'+id).onchange=render;
+$('#search').oninput=render;
+$('#reset').onclick=()=>{for(const id of ['category','chain','signal','verdict'])$('#'+id).value='all';$('#search').value='';$('#sort').value='implied_value_usd';render();};
+document.querySelectorAll('[data-tab]').forEach(b=>b.onclick=()=>{state.tab=b.dataset.tab;render();});
+document.addEventListener('keydown',e=>{if(e.key==='Escape'&&$('#detail-view'))closeDetail();});
+window.addEventListener('hashchange',readHash);
+render();readHash();

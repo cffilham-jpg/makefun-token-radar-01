@@ -1,111 +1,39 @@
 <!doctype html>
 <html lang="en">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Launch Observatory — Token Radar</title>
-<link rel="stylesheet" href="app.css">
-<script defer src="../data.js">
-</script>
-<script defer src="app.js">
-</script>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Launch Observatory · radar-4</title>
+  <link rel="stylesheet" href="app.css">
+  <script defer src="../data.js"></script>
+  <script defer src="app.js"></script>
 </head>
 <body>
-<div class="shell">
-<header>
-<a class="brand" href="#">
-<span class="radar-icon" aria-hidden="true">◉</span> LAUNCH<span>OBSERVATORY</span>
-</a>
-<div class="stamp">
-<i>
-</i> SEALED SNAPSHOT <span id="asof">
-</span>
-</div>
-</header>
-<section class="hero">
-<div>
-<div class="eyebrow">TOKEN RADAR / 01</div>
-<h1>Find the signal.<br>
-<em>Before the launch.</em>
-</h1>
-<p>Fitted comps curve. Tested out of sample. Protocols that record no token, ranked by implied value.<br>A record is not proof of token absence. Implied values are our own model claims.</p>
-</div>
-<div class="radar-art" aria-hidden="true">
-<div class="sweep">
-</div>
-<span class="blip b1">
-</span>
-<span class="blip b2">
-</span>
-<span class="blip b3">
-</span>
-<div class="cross">
-</div>
-<b>SCANNING THE<br>PRE-TOKEN HORIZON</b>
-</div>
-</section>
-<section id="stats" class="stats" aria-label="Snapshot statistics">
-</section>
-<nav id="tabs" aria-label="Views">
-<button data-tab="board" class="active">Board <span id="board-count">
-</span>
-</button>
-<button data-tab="farms">Top farms <span>08</span>
-</button>
-<button data-tab="live">Already trading <span>24</span>
-</button>
-<button data-tab="model">How the model works</button>
-<span class="nav-note">radar-3 / OFFLINE BY DESIGN</span>
-</nav>
-<section class="controls" id="controls">
-<label class="search">Search protocols<input id="search" type="search" placeholder="Name or slug…">
-</label>
-<label>Category<select id="category">
-<option value="all">All categories</option>
-</select>
-</label>
-<label>Chain<select id="chain">
-<option value="all">All chains</option>
-</select>
-</label>
-<label>Signal<select id="signal">
-<option value="all">All signals</option>
-<option>launch-ready</option>
-<option>warming-up</option>
-<option>early</option>
-<option>cooling</option>
-</select>
-</label>
-<label>Verdict<select id="verdict">
-<option value="all">All verdicts</option>
-<option>farm</option>
-<option>thin</option>
-<option>skip</option>
-</select>
-</label>
-<label>Sort by<select id="sort">
-<option value="implied_value_usd">Implied value ↓</option>
-<option value="tvl_usd">TVL ↓</option>
-<option value="change_7d">7d growth ↓</option>
-<option value="age_days">Age ↓</option>
-<option value="rank">Rank ↑</option>
-<option value="breakeven_share">Break-even share ↑</option>
-<option value="breakeven_desc">Break-even share ↓</option>
-</select>
-</label>
-<button id="reset" class="quiet">Reset</button>
-</section>
-<main id="content">
-</main>
-<footer>
-<span>SEALED DATA. OPEN REASONING.</span>
-<span>DefiLlama record ≠ proof of token absence. Implied value is our own claim, not a price or launch forecast.</span>
-</footer>
-</div>
-<div id="shade" hidden>
-</div>
-<aside id="detail" role="dialog" aria-modal="true" aria-labelledby="detail-title" hidden>
-</aside>
+  <div class="shell" id="main-view">
+    <header><b class="brand">◉ LAUNCH OBSERVATORY <small>/ radar-4</small></b><span>SEALED <span id="asof"></span></span></header>
+    <div id="verify-badge"></div>
+    <section class="hero"><h1>Find the signal before the ticker.</h1><p>A snapshot-based value map, with blind tests and a costed route from research to exit. Records no token ≠ proof of absence.</p></section>
+    <section id="stats" class="stats"></section>
+    <nav id="tabs">
+      <button data-tab="board">Radar board</button>
+      <button data-tab="farms">Farm shortlist</button>
+      <button data-tab="live">Already trading</button>
+      <button data-tab="model">Method & evidence</button>
+      <span id="board-count"></span>
+    </nav>
+    <section id="model-strip"></section>
+    <section class="controls" id="controls">
+      <label class="search">Search<input id="search" placeholder="Protocol or slug"></label>
+      <label>Category<select id="category"></select></label>
+      <label>Chain<select id="chain"></select></label>
+      <label>Signal<select id="signal"></select></label>
+      <label>Verdict<select id="verdict"></select></label>
+      <label>Sort<select id="sort"></select></label>
+      <button id="reset">Reset</button>
+    </section>
+    <main id="content"></main>
+    <footer>LAUNCH OBSERVATORY <span>Conditional estimates · no launch or reward promised · offline by design</span></footer>
+  </div>
+  <div id="detail-root"></div>
 </body>
 </html>
-

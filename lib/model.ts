@@ -33,20 +33,31 @@ const cmp=(a:string,b:string)=>a<b?-1:a>b?1:0;
 const hash=(s:string)=>{let h=2166136261;for(const c of s)h=Math.imul(h^c.charCodeAt(0),16777619);return h>>>0;};
 const clamp=(x:number,a:number,b:number)=>Math.min(b,Math.max(a,x));
 export function ageOf(p:Protocol,s:Snapshot){return p.listed_at===null?365:Math.max(0,Math.floor((day(s.as_of)-day(p.listed_at))/86400000));}
-// radar-3 fits log market cap against log TVL; all uncertainty is conditional on these comps.
+// Robust cross-sectional fit. All folds and resamples refit both curve and families.
 const median=(xs:number[])=>quantile(xs,.5);
 function quantile(xs:number[],q:number){const a=[...xs].sort((a,b)=>a-b);if(!a.length)return 0;const i=(a.length-1)*q,l=Math.floor(i);return a[l]+(a[Math.ceil(i)]-a[l])*(i-l);}
+export function familyOf(category:string|null){const c=category??'';return /lend|cdp/i.test(c)?'Lending & CDP':/dex|trad|deriv|perp|prediction/i.test(c)?'Trading':/yield|farm|vault|curator|allocator|restak/i.test(c)?'Vaults & yield':/rwa|stable/i.test(c)?'RWA & stables':/stak/i.test(c)?'Staking':/bridge|chain|infra|liquid/i.test(c)?'Infra & chains':'Other';}
+const familyNames=['Infra & chains','Lending & CDP','Other','RWA & stables','Staking','Trading','Vaults & yield'];
 function fitCurve(ps:Protocol[],multiple:number){
  const n=ps.length,x=ps.map(p=>Math.log(p.tvl_usd)),y=ps.map(p=>Math.log(p.mcap_usd!));
- const mx=x.reduce((a,b)=>a+b,0)/n,my=y.reduce((a,b)=>a+b,0)/n;
- const xx=x.reduce((a,v)=>a+(v-mx)**2,0),xy=x.reduce((a,v,i)=>a+(v-mx)*(y[i]-my),0);
- const b=xy/xx,a=my-b*mx,ok=n>=10&&b>0&&Number.isFinite(b)&&Number.isFinite(a);
- const slope=ok?b:1,intercept=ok?a:Math.log(multiple);
- const total=y.reduce((s,v)=>s+(v-my)**2,0),error=y.reduce((s,v,i)=>s+(v-intercept-slope*x[i])**2,0);
- return {slope,intercept,r2:total>0?1-error/total:0,n,method:ok?'log-log OLS':'median-multiple fallback'};
+ let weights=x.map(()=>1),slope=1,intercept=Math.log(multiple);
+ for(let iter=0;iter<=3;iter++){
+  const sw=weights.reduce((a,b)=>a+b,0),mx=x.reduce((a,v,i)=>a+v*weights[i],0)/sw,my=y.reduce((a,v,i)=>a+v*weights[i],0)/sw;
+  slope=x.reduce((a,v,i)=>a+weights[i]*(v-mx)*(y[i]-my),0)/x.reduce((a,v,i)=>a+weights[i]*(v-mx)**2,0);intercept=my-slope*mx;
+  if(iter<3){const residual=y.map((v,i)=>v-intercept-slope*x[i]),center=median(residual),scale=Math.max(1e-9,1.4826*median(residual.map(r=>Math.abs(r-center))));weights=residual.map(r=>Math.min(1,1.345*scale/Math.abs(r)));}
+ }
+ if(n<10||slope<=0||!Number.isFinite(slope)||!Number.isFinite(intercept)){slope=1;intercept=Math.log(multiple);}
+ const mean=y.reduce((a,b)=>a+b,0)/n,total=y.reduce((a,v,i)=>a+weights[i]*(v-mean)**2,0),error=y.reduce((a,v,i)=>a+weights[i]*(v-intercept-slope*x[i])**2,0);
+ return {slope,intercept,r2:total>0?1-error/total:0,n,method:'huber-log-log-ols',huber_c:1.345,huber_iters:3};
 }
 function multipleOf(ps:Protocol[]){return ps.length<10?.25:median(ps.map(p=>p.mcap_usd!/p.tvl_usd));}
-function evaluate(train:Protocol[],test:Protocol[]){const f=fitCurve(train,multipleOf(train));const errors=test.map(p=>Math.abs(Math.log(p.mcap_usd!)-(f.intercept+f.slope*Math.log(p.tvl_usd))));return {n_test:test.length,median_abs_log_error:test.length?median(errors):null,within_factor_2:test.length?errors.filter(e=>e<=Math.log(2)).length/test.length:null};}
+function fitted(ps:Protocol[]){const fit=fitCurve(ps,multipleOf(ps));const families=familyNames.map(family=>{const members=ps.filter(p=>familyOf(p.category)===family),offset=members.reduce((sum,p)=>sum+Math.log(p.mcap_usd!)-fit.intercept-fit.slope*Math.log(p.tvl_usd),0)/(members.length+8);return {family,n:members.length,offset,multiple:Math.exp(offset)};});return {fit,families};}
+function priors(p:Protocol,s:Snapshot){const age=ageOf(p,s);return {growth:1+.25*Math.tanh((p.change_7d??0)/50),maturity:.85+.15*Math.log1p(Math.min(age,1095))/Math.log1p(1095),breadth:1+.02*Math.min(Math.max(p.chains.length-1,0),5)};}
+function predicted(p:Protocol,s:Snapshot,f:ReturnType<typeof fitted>,mode='full'){const offset=mode==='curve'?0:f.families.find(v=>v.family===familyOf(p.category))!.offset;const a=priors(p,s);return Math.exp(f.fit.intercept+f.fit.slope*Math.log(p.tvl_usd)+offset)*(mode==='full'?a.growth*a.maturity*a.breadth:1);}
+function ranks(xs:number[]){return xs.map(v=>{const less=xs.filter(x=>x<v).length,equal=xs.filter(x=>x===v).length;return less+(equal+1)/2;});}
+function spearman(a:number[],b:number[]){const x=ranks(a),y=ranks(b),mx=x.reduce((a,b)=>a+b,0)/x.length,my=y.reduce((a,b)=>a+b,0)/y.length;const cov=x.reduce((s,v,i)=>s+(v-mx)*(y[i]-my),0);return cov/Math.sqrt(x.reduce((s,v)=>s+(v-mx)**2,0)*y.reduce((s,v)=>s+(v-my)**2,0))||0;}
+function evaluate(train:Protocol[],test:Protocol[],s:Snapshot){const f=fitted(train),errors=test.map(p=>Math.abs(Math.log(p.mcap_usd!)-Math.log(predicted(p,s,f))));return {n_test:test.length,median_abs_log_error:test.length?median(errors):null,within_factor_2:test.length?errors.filter(e=>e<=Math.log(2)).length/test.length:null};}
+function leaveOneOut(comps:Protocol[],s:Snapshot){const result:any={};for(const mode of ['flat','curve','family','full']){const actual:number[]=[],pred:number[]=[];comps.forEach((p,i)=>{const train=comps.filter((_,j)=>i!==j),f=fitted(train);actual.push(p.mcap_usd!);pred.push(mode==='flat'?multipleOf(train)*p.tvl_usd:predicted(p,s,f,mode));});const errors=pred.map((v,i)=>Math.abs(Math.log(v/actual[i])));result[mode]={n:comps.length,median_miss:Math.exp(median(errors)),mean_abs_log_error:errors.reduce((a,b)=>a+b,0)/errors.length,within_factor_3:errors.filter(e=>e<=Math.log(3)).length/errors.length,spearman:spearman(pred,actual)};}return result;}
 function mulberry32(seed:number){return ()=>{let t=seed+=0x6D2B79F5;t=Math.imul(t^(t>>>15),t|1);t^=t+Math.imul(t^(t>>>7),t|61);return ((t^(t>>>14))>>>0)/4294967296;};}
 const capitalOf=(p:Protocol)=>p.tvl_usd>=1e9?250:p.tvl_usd>=1e8?150:p.tvl_usd>=1e7?100:50;
 const holdOf=(age:number)=>age<180?90:age<365?60:30;
@@ -65,46 +76,46 @@ function action(p:Protocol,chain:string,capital:number){
  return `${verb} with $${capital} through ${p.name} on ${chain}`;
 }
 export function farmPlan(p:Protocol,age:number){
- const capital=capitalOf(p),hold=holdOf(age),gas=(3+Math.ceil(hold/7))*10,total=capital+gas,chain=p.chains[0]??'the supported main chain';
- const variant=(i:number,a:string[])=>a[hash(p.slug+':'+i)%a.length];
- const step=(a:string,c:string,t:string)=>`${a.replace(/[. ]+$/,'')}. Cost: ${c}. Time: ${t}.`;
- const steps=[
- step(variant(0,['Create a fresh wallet and store its seed offline; verify the receiving address','Isolate farming funds in a fresh wallet with its seed stored offline']),'$0 setup','10 minutes'),
- step(action(p,chain,capital)+'; verify contracts, asset support and withdrawal terms',`$${capital} capital at risk; $10 planned gas`,'15 minutes'),
- step(`Budget $${total} total planned spend: $${capital} capital plus $${gas} gas estimate for ${3+Math.ceil(hold/7)} actions at $10 each; keep a log of every receipt and actual fee`, 'planning only; capital may be recoverable','10 minutes'),
- step(variant(2,['Return weekly for one eligible core action; avoid artificial volume and log receipts','Perform one core action weekly after checking protocol eligibility rules']), '$10 gas estimate per action','10 minutes weekly'),
- step(`Hold for ${hold} days, reviewing solvency and withdrawal availability weekly`, `$${capital} remains exposed`,`${hold} days`),
- step(p.chains.length>1?`Inspect ${p.name} on ${p.chains[1]}; consider a second-chain route only by reallocating existing capital within the budget`:`Check ${p.name}'s points page and record eligibility and snapshot rules`, '$0 read-only research; extra transactions require a revised budget','10 minutes'),
- step(variant(6,['Rehearse the exit with a small test withdrawal and reconcile the receipt in your log','Test a small withdrawal before the final exit and record recovered capital']), '$10 planned gas','10 minutes')];
- const n=7+hash(p.slug)%3;
- // Weekly cadence and holding window share a step, leaving room for every required action.
- steps[3]=step(`Return weekly for one eligible core action over ${hold} days; review solvency, log receipts and avoid artificial volume`, '$10 gas estimate per action', '10 minutes weekly');
- steps.splice(4,1);
- if(n>=8)steps.push(step('Review the logged fees against the planned budget; pause if eligibility or costs change','$0 review','5 minutes'));
- if(n===9)steps.push(step('Read protocol risk disclosures and document contract, asset and liquidity risks without adding transactions','$0 research','10 minutes'));
- steps.push(step(variant(5,['Use only protocol-published claim links; never pay to claim; log wallet, fees and exit dates','Keep receipts and a safety log; never pay to claim and verify every protocol-published link']),'$0 review; any future claim gas is outside this plan','5 minutes'));
- // Optional reviews vary length; the exit and final safety steps are never removed.
- if(steps.some(s=>s.length<20||s.length>600))throw new Error('Invalid generated plan');return steps;
+ const capital=capitalOf(p),hold=holdOf(age),gas=(3+Math.ceil(hold/7))*10,total=capital+gas,stop=Math.round(.9*p.tvl_usd);
+ const steps:string[]=[],when:string[]=[],minutes:number[]=[];
+ const add=(text:string,cost:string,time:number,label:string)=>{steps.push(`${text}. Cost: ${cost}. Time: ${time} minutes.`);when.push(label);minutes.push(time);};
+ add('Create a fresh wallet; store its seed offline and verify the receiving address','$0 setup',10,'day 0');
+ add(action(p,p.chains[0]??'the supported main chain',capital)+'; verify contracts and withdrawal terms',`$${capital} capital; $10 planned gas`,15,'day 0');
+ add(`Budget $${total} total planned spend: $${capital} capital plus $${gas} gas at $10 per action; keep a receipt and fee log`,'$0 planning',10,'day 0');
+ add(`Set a stop level: exit if TVL closes under $${stop.toLocaleString('en-US')} (90% of current TVL); check withdrawal liquidity before entering`,'$0 review',5,'day 0');
+ add(`Check weekly over ${hold} days; compare TVL with the stop level, review solvency and perform one eligible core action; log receipts`,'$10 gas per weekly action',10,'weekly');
+ add(p.chains.length>1?`Inspect ${p.name} on ${p.chains[1]}; reallocate existing funds only if a second-chain route fits the budget`:`Read ${p.name} points and eligibility rules; record requirements without assuming a reward`,'$0 research',10,'weekly');
+ add('Rehearse the exit with a small test withdrawal; reconcile recovered capital and fees in the log','$10 planned gas',10,`day ${hold}`);
+ if(hash(p.slug)%2)add('Review logged costs; pause if eligibility, fees or withdrawal terms have changed','$0 review',5,`day ${hold}`);
+ add('Use protocol-published links only; never pay to claim; revoke unneeded permissions and retain receipts','$0 review; future claim gas excluded',5,`day ${hold}`);
+ if(steps.some(v=>v.length<20||v.length>600))throw Error('Invalid generated plan');
+ return {steps,when,hands_on_minutes:minutes.reduce((a,b)=>a+b,0)};
 }
 export function buildRadar(s:Snapshot){
  const comps=s.protocols.filter(p=>(p.mcap_usd??0)>0&&p.tvl_usd>0&&p.category!=='CEX'&&p.mcap_usd!/p.tvl_usd>=.02&&p.mcap_usd!/p.tvl_usd<=10);
- const calibratedMultiple=multipleOf(comps),fit=fitCurve(comps,calibratedMultiple);
+ const calibratedMultiple=multipleOf(comps),full=fitted(comps),{fit,families}=full;
  const dated=comps.filter(p=>p.listed_at!==null),cut=median(dated.map(p=>day(p.listed_at!)));
- const oos={holdout:evaluate(comps.filter(p=>hash(p.slug)%5!==0),comps.filter(p=>hash(p.slug)%5===0)),time_split:evaluate(dated.filter(p=>day(p.listed_at!)<=cut),dated.filter(p=>day(p.listed_at!)>cut))};
- const random=mulberry32(0x52414433),fits=Array.from({length:200},()=>{const sample=Array.from({length:comps.length},()=>comps[Math.floor(random()*comps.length)]);return fitCurve(sample,multipleOf(sample));});
- const bootstrap={resamples:200,slope_p10:quantile(fits.map(f=>f.slope),.1),slope_p90:quantile(fits.map(f=>f.slope),.9),intercept_p10:quantile(fits.map(f=>f.intercept),.1),intercept_p90:quantile(fits.map(f=>f.intercept),.9)};
- const model={calibratedMultiple,calibration_samples:comps.length,fit,oos,bootstrap,ratio_min:.02,ratio_max:10,fallback:.25,growth_weight:.5,growth_scale:50,maturity_floor:.55,maturity_range:.45,maturity_days:1095,unknown_age_days:365,breadth_step:.05,breadth_cap:5,farm:{gas_per_action_usd:10,verdict_farm_max_share:.00002,verdict_thin_max_share:.00006}};
+ const oos={holdout:evaluate(comps.filter(p=>hash(p.slug)%5!==0),comps.filter(p=>hash(p.slug)%5===0),s),time_split:evaluate(dated.filter(p=>day(p.listed_at!)<=cut),dated.filter(p=>day(p.listed_at!)>cut),s)};
+ const random=mulberry32(0x52414433),fits=Array.from({length:200},()=>{const sample=Array.from({length:comps.length},()=>comps[Math.floor(random()*comps.length)]);return fitted(sample);});
+ const bootstrap={resamples:200,slope_p10:quantile(fits.map(f=>f.fit.slope),.1),slope_p90:quantile(fits.map(f=>f.fit.slope),.9),intercept_p10:quantile(fits.map(f=>f.fit.intercept),.1),intercept_p90:quantile(fits.map(f=>f.fit.intercept),.9)};
+ const model={calibratedMultiple,calibration_samples:comps.length,fit,families,loo:leaveOneOut(comps,s),oos,bootstrap,ratio_min:.02,ratio_max:10,fallback:.25,growth_weight:.25,growth_scale:50,maturity_floor:.85,maturity_range:.15,maturity_days:1095,unknown_age_days:365,breadth_step:.02,breadth_cap:5,farm:{gas_per_action_usd:10,verdict_farm_max_share:.00003,verdict_thin_max_share:.00009,airdrop_share_assumption:.10}};
  const rows=s.protocols.filter(isRankable).map(p=>{
- const age=ageOf(p,s),growth=1+.5*Math.tanh((p.change_7d??0)/50),maturity=.55+.45*Math.log1p(Math.min(age,1095))/Math.log1p(1095),breadth=1+.05*Math.min(Math.max(p.chains.length-1,0),5);
- const value=(f:typeof fit)=>Math.max(1,Math.round(Math.exp(f.intercept+f.slope*Math.log(p.tvl_usd))*growth*maturity*breadth));
- const implied_value_usd=value(fit),values=fits.map(value),band_low_usd=Math.min(implied_value_usd,Math.max(1,Math.round(quantile(values,.1)))),band_high_usd=Math.max(implied_value_usd,Math.round(quantile(values,.9)));
+ const age=ageOf(p,s),{growth,maturity,breadth}=priors(p,s),family=familyOf(p.category),family_offset=families.find(f=>f.family===family)!.offset;
+ const value=(f:ReturnType<typeof fitted>)=>Math.max(1,Math.round(predicted(p,s,f)));
+ const implied_value_usd=value(full),values=fits.map(value),band_low_usd=Math.min(implied_value_usd,Math.max(1,Math.round(quantile(values,.1)))),band_high_usd=Math.max(implied_value_usd,Math.round(quantile(values,.9)));
+ const peers=comps.filter(c=>familyOf(c.category)===family).sort((a,b)=>Math.abs(Math.log(a.tvl_usd/p.tvl_usd))-Math.abs(Math.log(b.tvl_usd/p.tvl_usd))||cmp(a.slug,b.slug)).slice(0,3).map(c=>({slug:c.slug,name:c.name,tvl_usd:c.tvl_usd,mcap_usd:c.mcap_usd,ratio:c.mcap_usd!/c.tvl_usd}));
+ const plan=farmPlan(p,age);
  const capital_usd=capitalOf(p),gas_usd=(3+Math.ceil(holdOf(age)/7))*10,total_cost_usd=capital_usd+gas_usd,breakeven_share=total_cost_usd/band_low_usd;
- return {...p,age_days:age,implied_value_usd,band_low_usd,band_high_usd,economics:{capital_usd,gas_usd,total_cost_usd,breakeven_share,verdict:breakeven_share<=model.farm.verdict_farm_max_share?'farm':breakeven_share<=model.farm.verdict_thin_max_share?'thin':'skip'},growth_multiplier:growth,maturity_multiplier:maturity,breadth_multiplier:breadth,farm_steps:farmPlan(p,age)};
+ const slice_usd=.10*implied_value_usd*capital_usd/p.tvl_usd,net_usd=slice_usd-total_cost_usd;
+ return {...p,watchlist:s.watchlist.includes(p.slug),family,family_offset,family_multiple:Math.exp(family_offset),peers,farm_when:plan.when,age_days:age,implied_value_usd,band_low_usd,band_high_usd,economics:{slice_usd,net_usd,breakeven_odds:slice_usd>0?Math.min(1,total_cost_usd/slice_usd):1,hands_on_minutes:plan.hands_on_minutes,net_per_hour_usd:net_usd/Math.max(plan.hands_on_minutes/60,1/60),capital_usd,gas_usd,total_cost_usd,breakeven_share,verdict:breakeven_share<=model.farm.verdict_farm_max_share?'farm':breakeven_share<=model.farm.verdict_thin_max_share?'thin':'skip'},growth_multiplier:growth,maturity_multiplier:maturity,breadth_multiplier:breadth,farm_steps:plan.steps};
  }).sort((a,b)=>b.implied_value_usd-a.implied_value_usd||cmp(a.slug,b.slug));
- const board=rows.map((r,i)=>{const score=.5*(1-i/rows.length)+.3*clamp(((r.change_7d??0)+50)/100,0,1)+.2*(r.maturity_multiplier-.55)/.45;return {...r,rank:i+1,signal:{score,tier:score>=.75?'launch-ready':score>=.55?'warming-up':score>=.35?'early':'cooling'}};});
+ const board=rows.map((r,i)=>{const score=.5*(1-i/rows.length)+.3*clamp(((r.change_7d??0)+50)/100,0,1)+.2*((.55+.45*Math.log1p(Math.min(r.age_days,1095))/Math.log1p(1095))-.55)/.45;return {...r,rank:i+1,signal:{score,tier:score>=.75?'launch-ready':score>=.55?'warming-up':score>=.35?'early':'cooling'}};});
  const live=s.protocols.filter(p=>(p.mcap_usd??0)>0&&p.category!=='CEX').sort((a,b)=>b.mcap_usd!-a.mcap_usd!||cmp(a.slug,b.slug)).slice(0,24);
  const counts={scanned:s.protocols.length,pre_token:s.protocols.filter(pre).length,board:board.length,watchlist:s.watchlist.length,covered:s.watchlist.filter(slug=>board.some(r=>r.slug===slug)).length,live:live.length};
- return {board,radar:{as_of:s.as_of,source:s.source,floor_usd:s.floor_usd,model,model_version:'radar-3',counts,rows:board,live,comps:comps.map(p=>({...p,holdout:hash(p.slug)%5===0}))}};
+ const accounting={scanned:s.protocols.length,ranked:0,token_record:0,excluded_category:0,wrapped_or_staked_name:0,exchange_name:0,versioned_name:0};
+ for(const p of s.protocols){const key=!pre(p)?'token_record':['Bridge','Canonical Bridge','Liquid Staking','Liquid Restaking','Restaked BTC','CEX'].includes(p.category??'')?'excluded_category':/\b(wrapped|staked|staking)\b/i.test(p.name)?'wrapped_or_staked_name':/^(Binance|Coinbase|Bybit|Kraken|Bitget|OKX|Bitfinex|Gemini)/i.test(p.name)?'exchange_name':/\s(V\d+(\.\d+)?|v\d+(\.\d+)?|\d+\.\d+)$/.test(p.name)?'versioned_name':'ranked';accounting[key]++;}
+ if(Object.entries(accounting).filter(([k])=>k!=='scanned').reduce((n,[,v])=>n+v,0)!==accounting.scanned)throw Error('Accounting mismatch');
+ return {board,radar:{as_of:s.as_of,source:s.source,floor_usd:s.floor_usd,model,model_version:'radar-4',accounting,counts,rows:board,live,comps:comps.map(p=>({...p,holdout:hash(p.slug)%5===0}))}};
 }
 export function boardIssue(board:any[],s:Snapshot):string|null{
  const slugs=new Set(board.map(r=>r.slug));if(slugs.size!==board.length)return 'Duplicate slug';
